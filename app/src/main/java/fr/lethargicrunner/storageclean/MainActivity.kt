@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -58,6 +59,8 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -134,7 +137,7 @@ fun StorageCleanApp(activity: ComponentActivity) {
     val selected = remember { mutableStateListOf<String>().apply { addAll(loadFolders(activity)) } }
     val typeSelected = remember { mutableStateMapOf<String, Boolean>().apply { putAll(loadTypes(activity)) } }
     var showPicker by remember { mutableStateOf(false) }
-    var report by remember { mutableStateOf<ScanReport?>(null) }
+    var report by remember { mutableStateOf<ScanReport?>(loadReport(activity)) }
     var progress by remember { mutableStateOf<ScanProgress?>(null) }
     var scanning by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -169,7 +172,7 @@ fun StorageCleanApp(activity: ComponentActivity) {
             color = MaterialTheme.colorScheme.background,
         ) {
             Column(
-                Modifier.padding(16.dp).fillMaxSize(),
+                Modifier.padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!hasAccess) {
@@ -194,80 +197,6 @@ fun StorageCleanApp(activity: ComponentActivity) {
                         }
                     }
                 } else {
-                    // --- Selection des dossiers ---
-                    Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("Dossiers a scanner", style = MaterialTheme.typography.titleMedium)
-                                Text(
-                                    selected.size.toString() + " coche(s)",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            if (selected.isEmpty()) {
-                                Text(
-                                    "Aucun dossier selectionne. Utilise le navigateur pour choisir les dossiers a scanner.",
-                                    fontSize = 13.sp,
-                                )
-                            } else {
-                                selected.sorted().forEach { folder ->
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        val viaParent = scanPaths.none { folder == it }
-                                        Text(
-                                            folder + if (viaParent) "  (recouvert par un dossier parent)" else "",
-                                            Modifier.fillMaxWidth(0.75f),
-                                            fontSize = 12.sp,
-                                        )
-                                        TextButton(onClick = {
-                                            selected.remove(folder)
-                                            saveFolders(activity, selected)
-                                        }) { Text("Retirer") }
-                                    }
-                                }
-                            }
-                            Button(onClick = { showPicker = true }, modifier = Modifier.fillMaxWidth()) {
-                                Text("Naviguer et cocher des dossiers")
-                            }
-                        }
-                    }
-
-                    // --- Selection des types de fichiers ---
-                    Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Types de fichiers", style = MaterialTheme.typography.titleMedium)
-                            Row(
-                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                CATEGORIES.forEach { c ->
-                                    FilterChip(
-                                        selected = typeSelected[c.name] == true,
-                                        onClick = {
-                                            typeSelected[c.name] = !(typeSelected[c.name] ?: false)
-                                            saveTypes(activity, typeSelected)
-                                        },
-                                        label = {
-                                            Column {
-                                                Text(c.name, fontSize = 13.sp)
-                                                Text(
-                                                    c.extensions.take(4).joinToString(", ") +
-                                                        if (c.extensions.size > 4) "…" else "",
-                                                    fontSize = 10.sp,
-                                                )
-                                            }
-                                        },
-                                    )
-                                }
-                            }
-                            Text(
-                                "L'audio n'est pas coche par defaut : les doublons MP3 sont deja traites par DupScan.",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-
                     Button(
                         onClick = {
                             if (!scanning) {
@@ -281,6 +210,7 @@ fun StorageCleanApp(activity: ComponentActivity) {
                                         }
                                     }
                                     report = result
+                                    saveReport(activity, result)
                                     scanning = false
                                     progress = null
                                 }
@@ -340,12 +270,16 @@ fun StorageCleanApp(activity: ComponentActivity) {
                                     TextButton(onClick = { expandedGroups.value = emptySet() }) {
                                         Text("Tout replier")
                                     }
+                                    TextButton(onClick = {
+                                        report = null
+                                        clearReport(activity)
+                                    }) { Text("Effacer le rapport") }
                                 }
                             }
                         }
 
-                        LazyColumn {
-                            itemsIndexed(r.groups) { i, g ->
+                        Column {
+                            r.groups.take(500).forEachIndexed { i, g ->
                                 Card(
                                     Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable {
                                         expandedGroups.value =
@@ -494,6 +428,80 @@ fun FolderPickerScreen(
                             fontWeight = if (isHidden) FontWeight.Bold else FontWeight.Normal,
                         )
                     }
+                    // --- Selection des dossiers ---
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Dossiers a scanner", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    selected.size.toString() + " coche(s)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (selected.isEmpty()) {
+                                Text(
+                                    "Aucun dossier selectionne. Utilise le navigateur pour choisir les dossiers a scanner.",
+                                    fontSize = 13.sp,
+                                )
+                            } else {
+                                selected.sorted().forEach { folder ->
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        val viaParent = scanPaths.none { folder == it }
+                                        Text(
+                                            folder + if (viaParent) "  (recouvert par un dossier parent)" else "",
+                                            Modifier.fillMaxWidth(0.75f),
+                                            fontSize = 12.sp,
+                                        )
+                                        TextButton(onClick = {
+                                            selected.remove(folder)
+                                            saveFolders(activity, selected)
+                                        }) { Text("Retirer") }
+                                    }
+                                }
+                            }
+                            Button(onClick = { showPicker = true }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Naviguer et cocher des dossiers")
+                            }
+                        }
+                    }
+
+                    // --- Selection des types de fichiers ---
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Types de fichiers", style = MaterialTheme.typography.titleMedium)
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                CATEGORIES.forEach { c ->
+                                    FilterChip(
+                                        selected = typeSelected[c.name] == true,
+                                        onClick = {
+                                            typeSelected[c.name] = !(typeSelected[c.name] ?: false)
+                                            saveTypes(activity, typeSelected)
+                                        },
+                                        label = {
+                                            Column {
+                                                Text(c.name, fontSize = 13.sp)
+                                                Text(
+                                                    c.extensions.take(4).joinToString(", ") +
+                                                        if (c.extensions.size > 4) "…" else "",
+                                                    fontSize = 10.sp,
+                                                )
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                            Text(
+                                "L'audio n'est pas coche par defaut : les doublons MP3 sont deja traites par DupScan.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
                 }
             }
         }
@@ -536,4 +544,69 @@ fun buildCsv(r: ScanReport): String {
         }
     }
     return sb.toString()
+}
+
+// ---------- Persistance du rapport ----------
+
+private fun reportFile(activity: ComponentActivity): File = File(activity.filesDir, "last_report.json")
+
+fun saveReport(activity: ComponentActivity, r: ScanReport) {
+    try {
+        val groups = JSONArray()
+        r.groups.take(2000).forEach { g ->
+            val files = JSONArray()
+            g.files.forEach { f ->
+                files.put(JSONArray().put(f.path).put(f.size).put(f.mtime).put(f.category ?: "").put(f.digest ?: ""))
+            }
+            groups.put(files)
+        }
+        val stats = JSONArray()
+        r.typeStats.forEach { ts ->
+            stats.put(JSONObject().put("category", ts.category).put("count", ts.count).put("bytes", ts.bytes))
+        }
+        val json = JSONObject()
+            .put("scanned", r.scanned)
+            .put("totalBytes", r.totalBytes)
+            .put("groups", groups)
+            .put("typeStats", stats)
+        reportFile(activity).writeText(json.toString())
+    } catch (_: Exception) {
+    }
+}
+
+fun clearReport(activity: ComponentActivity) {
+    reportFile(activity).delete()
+}
+
+fun loadReport(activity: ComponentActivity): ScanReport? {
+    return try {
+        val f = reportFile(activity)
+        if (!f.exists()) return null
+        val json = JSONObject(f.readText())
+        val groups = ArrayList<DupGroup>()
+        val arr = json.getJSONArray("groups")
+        for (i in 0 until arr.length()) {
+            val filesArr = arr.getJSONArray(i)
+            val files = ArrayList<FileInfo>()
+            for (j in 0 until filesArr.length()) {
+                val fa = filesArr.getJSONArray(j)
+                val cat = fa.getString(3)
+                val fi = FileInfo(fa.getString(0), fa.getLong(1), fa.getLong(2), if (cat.isEmpty()) null else cat)
+                fi.digest = if (fa.getString(4).isEmpty()) null else fa.getString(4)
+                files.add(fi)
+            }
+            groups.add(DupGroup(files))
+        }
+        val statsArr = json.optJSONArray("typeStats")
+        val stats = ArrayList<TypeStat>()
+        if (statsArr != null) {
+            for (i in 0 until statsArr.length()) {
+                val o = statsArr.getJSONObject(i)
+                stats.add(TypeStat(o.getString("category"), o.getInt("count"), o.getLong("bytes")))
+            }
+        }
+        ScanReport(json.getInt("scanned"), json.getLong("totalBytes"), groups, stats)
+    } catch (_: Exception) {
+        null
+    }
 }
