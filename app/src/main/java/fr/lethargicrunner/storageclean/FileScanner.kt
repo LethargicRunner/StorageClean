@@ -25,6 +25,8 @@ data class ScanReport(
     val totalBytes: Long,
     val groups: List<DupGroup>,
     val typeStats: List<TypeStat>,
+    /** Fichiers par categorie, pour le nettoyage assiste (vide sur les anciens rapports). */
+    val categoryFiles: Map<String, List<FileInfo>> = emptyMap(),
 ) {
     val redundant: Int get() = groups.sumOf { it.files.size - 1 }
     val spaceGain: Long get() = groups.sumOf { it.gain }
@@ -103,12 +105,13 @@ object FileScanner {
             .map { DupGroup(it) }
             .sortedByDescending { it.gain }
 
-        val typeStats = files
-            .groupBy { it.category ?: "Autres" }
+        val categoryFiles = files.groupBy { it.category ?: "Autres" }
+
+        val typeStats = categoryFiles
             .map { (cat, list) -> TypeStat(cat, list.size, list.sumOf { it.size }) }
             .sortedByDescending { it.bytes }
 
-        return ScanReport(files.size, totalBytes, groups, typeStats)
+        return ScanReport(files.size, totalBytes, groups, typeStats, categoryFiles)
     }
 
     private fun sha256(file: File): String? {

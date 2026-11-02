@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -51,6 +50,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -136,13 +136,17 @@ fun isHiddenPath(path: String): Boolean =
 fun StorageCleanApp(activity: ComponentActivity) {
     val selected = remember { mutableStateListOf<String>().apply { addAll(loadFolders(activity)) } }
     val typeSelected = remember { mutableStateMapOf<String, Boolean>().apply { putAll(loadTypes(activity)) } }
+    val checkedFiles = remember { mutableStateMapOf<String, Boolean>() }
     var showPicker by remember { mutableStateOf(false) }
+    var showTrash by remember { mutableStateOf(false) }
     var report by remember { mutableStateOf<ScanReport?>(loadReport(activity)) }
     var progress by remember { mutableStateOf<ScanProgress?>(null) }
     var scanning by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var hasAccess by remember { mutableStateOf(Environment.isExternalStorageManager()) }
     val expandedGroups = remember { mutableStateOf(setOf(0)) }
+    val expandedCats = remember { mutableStateOf(setOf<String>()) }
+    var trashCount by remember { mutableStateOf(Trash.count(activity)) }
     val scope = rememberCoroutineScope()
 
     if (showPicker) {
@@ -158,6 +162,15 @@ fun StorageCleanApp(activity: ComponentActivity) {
         return
     }
 
+    if (showTrash) {
+        TrashScreen(
+            activity = activity,
+            onDone = { showTrash = false },
+            onChanged = { trashCount = Trash.count(activity) },
+        )
+        return
+    }
+
     val scanPaths = absorbedPaths(selected)
     val selectedExts = CATEGORIES
         .filter { typeSelected[it.name] == true }
@@ -165,7 +178,16 @@ fun StorageCleanApp(activity: ComponentActivity) {
         .toSet()
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("StorageClean") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("StorageClean") },
+                actions = {
+                    TextButton(onClick = { showTrash = true }) {
+                        Text("Corbeille (" + trashCount + ")")
+                    }
+                },
+            )
+        },
     ) { innerPadding ->
         Surface(
             Modifier.fillMaxSize().padding(innerPadding),
@@ -180,7 +202,7 @@ fun StorageCleanApp(activity: ComponentActivity) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Acces aux fichiers requis", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "StorageClean a besoin de l'acces a tous les fichiers pour scanner les memoires du telephone. Aucun fichier n'est jamais modifie ni supprime.",
+                                "StorageClean a besoin de l'acces a tous les fichiers pour scanner les memoires du telephone. Les suppressions passent par la corbeille de l'application, restaurable a tout moment.",
                                 fontSize = 13.sp,
                             )
                             Button(onClick = {
@@ -203,6 +225,7 @@ fun StorageCleanApp(activity: ComponentActivity) {
                                 scanning = true
                                 report = null
                                 message = null
+                                checkedFiles.clear()
                                 scope.launch {
                                     val result = withContext(Dispatchers.IO) {
                                         FileScanner.scan(scanPaths, selectedExts) { p ->
@@ -240,14 +263,133 @@ fun StorageCleanApp(activity: ComponentActivity) {
                         Card(Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("Etat du stockage", style = MaterialTheme.typography.titleMedium)
+                                if (r.categoryFiles.isEmpty()) {
+                                    Text(
+                                        "Relance un scan pour activer le nettoyage par categorie (les anciens rapports ne listaient pas les fichiers).",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                                 r.typeStats.forEach { ts ->
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text(ts.category, fontSize = 13.sp)
-                                        Text(
-                                            ts.count.toString() + " fichiers — " + human(ts.bytes),
-                                            fontSize = 13.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
+                                    Column {
+                                        Row(
+                                            Modifier.fillMaxWidth().clickable {
+                                                expandedCats.value =
+                                                    if (ts.category in expandedCats.value) expandedCats.value - ts.category
+                                                    else expandedCats.value + ts.category
+                                            },
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                        ) {
+                                            Text(
+                                                (if (ts.category in expandedCats.value) "v " else "> ") + ts.category,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                            )
+                                            Text(
+                                                ts.count.toString() + " fichiers — " + human(ts.bytes),
+                                                fontSize = 13.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        if (ts.category in expandedCats.value && r.categoryFiles.isNotEmpty()) {
+                                            val files = (r.categoryFiles[ts.category] ?: emptyList())
+                                                .sortedByDescending { it.size }
+                                            var selCount = 0
+                                            var selBytes = 0L
+                                            files.forEach { f ->
+                                                if (checkedFiles[f.path] == true) {
+                                                    selCount++
+                                                    selBytes += f.size
+                                                }
+                                            }
+                                            files.take(500).forEach { f ->
+                                                val hidden = if (isHiddenPath(f.path)) " [cache]" else ""
+                                                Row(
+                                                    Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Checkbox(
+                                                        checked = checkedFiles[f.path] == true,
+                                                        onCheckedChange = { v ->
+                                                            if (v) checkedFiles[f.path] = true
+                                                            else checkedFiles.remove(f.path)
+                                                        },
+                                                    )
+                                                    Text(
+                                                        "• " + human(f.size) + "  " + f.path + hidden,
+                                                        fontSize = 12.sp,
+                                                    )
+                                                }
+                                            }
+                                            if (files.size > 500) {
+                                                Text(
+                                                    "… et " + (files.size - 500) + " autres fichiers",
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                            if (selCount > 0) {
+                                                Button(
+                                                    onClick = {
+                                                        scope.launch {
+                                                            val moved = withContext(Dispatchers.IO) {
+                                                                val movedList = mutableListOf<String>()
+                                                                files.forEach { f ->
+                                                                    if (checkedFiles[f.path] == true &&
+                                                                        Trash.move(activity, f.path) != null
+                                                                    ) {
+                                                                        movedList.add(f.path)
+                                                                    }
+                                                                }
+                                                                movedList
+                                                            }
+                                                            if (moved.isNotEmpty()) {
+                                                                val movedSet = moved.toHashSet()
+                                                                val movedBytes = r.categoryFiles.values
+                                                                    .flatten()
+                                                                    .filter { it.path in movedSet }
+                                                                    .sumOf { it.size }
+                                                                val all = r.categoryFiles.values
+                                                                    .flatten()
+                                                                    .filter { it.path !in movedSet }
+                                                                val newCatFiles = all.groupBy { it.category ?: "Autres" }
+                                                                val newStats = newCatFiles
+                                                                    .map { (cat, list) ->
+                                                                        TypeStat(cat, list.size, list.sumOf { it.size })
+                                                                    }
+                                                                    .sortedByDescending { it.bytes }
+                                                                val newGroups = r.groups
+                                                                    .map { g ->
+                                                                        g.copy(files = g.files.filter { it.path !in movedSet })
+                                                                    }
+                                                                    .filter { it.files.size > 1 }
+                                                                val newReport = ScanReport(
+                                                                    r.scanned - moved.size,
+                                                                    r.totalBytes - movedBytes,
+                                                                    newGroups,
+                                                                    newStats,
+                                                                    newCatFiles,
+                                                                )
+                                                                report = newReport
+                                                                saveReport(activity, newReport)
+                                                                checkedFiles.clear()
+                                                                trashCount = Trash.count(activity)
+                                                                message = moved.size.toString() +
+                                                                    " fichier(s) mis a la corbeille (" +
+                                                                    human(movedBytes) + ")."
+                                                            }
+                                                        }
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                ) {
+                                                    Text(
+                                                        "Mettre a la corbeille — " + selCount +
+                                                            " fichier(s), " + human(selBytes),
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 Spacer(Modifier.height(4.dp))
@@ -507,6 +649,69 @@ fun FolderPickerScreen(
     }
 }
 
+// ---------- Ecran corbeille ----------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TrashScreen(activity: ComponentActivity, onDone: () -> Unit, onChanged: () -> Unit) {
+    var items by remember { mutableStateOf(Trash.load(activity)) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Corbeille (" + items.size + ")") },
+                navigationIcon = { TextButton(onClick = onDone) { Text("Retour") } },
+                actions = {
+                    if (items.isNotEmpty()) {
+                        TextButton(onClick = {
+                            Trash.empty(activity)
+                            items = Trash.load(activity)
+                            onChanged()
+                        }) { Text("Vider") }
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
+        Column(Modifier.padding(innerPadding).padding(16.dp).fillMaxSize()) {
+            Text(
+                "Les fichiers supprimes sont deplaces dans .StorageCleanTrash, a la racine de leur memoire : " +
+                    "rien n'est definitivement perdu tant que la corbeille n'est pas videe.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (items.isEmpty()) {
+                Text("Corbeille vide.")
+            }
+            LazyColumn {
+                items(items, key = { it.trashPath }) { item ->
+                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(File(item.originalPath).name, style = MaterialTheme.typography.titleSmall)
+                            Text("Origine : " + item.originalPath, fontSize = 11.sp)
+                            Text("Taille : " + human(item.size), fontSize = 11.sp)
+                            Row {
+                                TextButton(onClick = {
+                                    if (Trash.restore(activity, item)) {
+                                        items = Trash.load(activity)
+                                        onChanged()
+                                    }
+                                }) { Text("Restaurer") }
+                                TextButton(onClick = {
+                                    Trash.deleteForever(activity, item)
+                                    items = Trash.load(activity)
+                                    onChanged()
+                                }) { Text("Supprimer definitivement") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------- Utilitaires ----------
 
 @Composable
@@ -549,6 +754,8 @@ fun buildCsv(r: ScanReport): String {
 
 private fun reportFile(activity: ComponentActivity): File = File(activity.filesDir, "last_report.json")
 
+private const val MAX_FILES_PER_CATEGORY = 1000
+
 fun saveReport(activity: ComponentActivity, r: ScanReport) {
     try {
         val groups = JSONArray()
@@ -563,11 +770,20 @@ fun saveReport(activity: ComponentActivity, r: ScanReport) {
         r.typeStats.forEach { ts ->
             stats.put(JSONObject().put("category", ts.category).put("count", ts.count).put("bytes", ts.bytes))
         }
+        val catFiles = JSONObject()
+        r.categoryFiles.forEach { (cat, list) ->
+            val arr = JSONArray()
+            list.take(MAX_FILES_PER_CATEGORY).forEach { f ->
+                arr.put(JSONArray().put(f.path).put(f.size).put(f.mtime).put(f.category ?: ""))
+            }
+            catFiles.put(cat, arr)
+        }
         val json = JSONObject()
             .put("scanned", r.scanned)
             .put("totalBytes", r.totalBytes)
             .put("groups", groups)
             .put("typeStats", stats)
+            .put("categoryFiles", catFiles)
         reportFile(activity).writeText(json.toString())
     } catch (_: Exception) {
     }
@@ -604,7 +820,21 @@ fun loadReport(activity: ComponentActivity): ScanReport? {
                 stats.add(TypeStat(o.getString("category"), o.getInt("count"), o.getLong("bytes")))
             }
         }
-        ScanReport(json.getInt("scanned"), json.getLong("totalBytes"), groups, stats)
+        val catFilesObj = json.optJSONObject("categoryFiles")
+        val catFiles = HashMap<String, List<FileInfo>>()
+        if (catFilesObj != null) {
+            for (cat in catFilesObj.keys()) {
+                val fa = catFilesObj.getJSONArray(cat)
+                val files = ArrayList<FileInfo>()
+                for (j in 0 until fa.length()) {
+                    val a = fa.getJSONArray(j)
+                    val c = a.getString(3)
+                    files.add(FileInfo(a.getString(0), a.getLong(1), a.getLong(2), if (c.isEmpty()) null else c))
+                }
+                catFiles[cat] = files
+            }
+        }
+        ScanReport(json.getInt("scanned"), json.getLong("totalBytes"), groups, stats, catFiles)
     } catch (_: Exception) {
         null
     }
