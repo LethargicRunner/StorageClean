@@ -52,4 +52,20 @@ class FileScannerTest {
             dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun ignoreLaCorbeilleStorageClean() {
+        val dir = createTempDir(prefix = "storageclean_test")
+        try {
+            val content = "doublon".repeat(20)
+            dir.resolve("a/doc.pdf").apply { parentFile.mkdirs() }.writeText(content)
+            dir.resolve(".StorageCleanTrash/doc.pdf").apply { parentFile.mkdirs() }.writeText(content)
+
+            val report = FileScanner.scan(listOf(dir.absolutePath), setOf("pdf"))
+            assertEquals(1, report.scanned)
+            assertTrue(report.groups.isEmpty())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

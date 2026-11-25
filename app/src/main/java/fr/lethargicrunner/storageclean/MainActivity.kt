@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -146,6 +147,7 @@ fun StorageCleanApp(activity: ComponentActivity) {
     var hasAccess by remember { mutableStateOf(Environment.isExternalStorageManager()) }
     val expandedGroups = remember { mutableStateOf(setOf(0)) }
     val expandedCats = remember { mutableStateOf(setOf<String>()) }
+    var pendingTrash by remember { mutableStateOf<List<FileInfo>?>(null) }
     var trashCount by remember { mutableStateOf(Trash.count(activity)) }
     val scope = rememberCoroutineScope()
 
@@ -259,6 +261,109 @@ fun StorageCleanApp(activity: ComponentActivity) {
                     message?.let { Text(it, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp) }
 
                     report?.let { r ->
+                        // --- Mise a la corbeille : confirmation et garde-fous ---
+                        val fileIndex = (r.categoryFiles.values.flatten() + r.groups.flatMap { it.files })
+                            .associateBy { it.path }
+                        val performTrash: (List<FileInfo>) -> Unit = { toMove ->
+                            scope.launch {
+                                val moved = withContext(Dispatchers.IO) {
+                                    val movedList = mutableListOf<String>()
+                                    // Dernier controle juste avant d'agir : jamais tous les exemplaires d'un groupe.
+                                    if (CleanupSafety.plan(toMove, r.groups).allowed) {
+                                        toMove.forEach { f ->
+                                            if (Trash.move(activity, f.path) != null) movedList.add(f.path)
+                                        }
+                                    }
+                                    movedList
+                                }
+                                if (moved.isEmpty()) {
+                                    message = "Aucun fichier deplace : rien n'a ete modifie."
+                                } else {
+                                    val movedSet = moved.toHashSet()
+                                    val movedBytes = r.categoryFiles.values
+                                        .flatten()
+                                        .filter { it.path in movedSet }
+                                        .sumOf { it.size }
+                                    val all = r.categoryFiles.values
+                                        .flatten()
+                                        .filter { it.path !in movedSet }
+                                    val newCatFiles = all.groupBy { it.category ?: "Autres" }
+                                    val newStats = newCatFiles
+                                        .map { (cat, list) ->
+                                            TypeStat(cat, list.size, list.sumOf { it.size })
+                                        }
+                                        .sortedByDescending { it.bytes }
+                                    val newGroups = r.groups
+                                        .map { g ->
+                                            g.copy(files = g.files.filter { it.path !in movedSet })
+                                        }
+                                        .filter { it.files.size > 1 }
+                                    val newReport = ScanReport(
+                                        r.scanned - moved.size,
+                                        r.totalBytes - movedBytes,
+                                        newGroups,
+                                        newStats,
+                                        newCatFiles,
+                                    )
+                                    report = newReport
+                                    saveReport(activity, newReport)
+                                    checkedFiles.clear()
+                                    trashCount = Trash.count(activity)
+                                    val failed = toMove.size - moved.size
+                                    message = moved.size.toString() +
+                                        " fichier(s) mis a la corbeille (" + human(movedBytes) + ")." +
+                                        if (failed > 0) " " + failed + " echec(s), fichiers laisses en place." else ""
+                                }
+                            }
+                        }
+                        pendingTrash?.let { pending ->
+                            val plan = remember(pending, r) { CleanupSafety.plan(pending, r.groups) }
+                            if (plan.blocked.isNotEmpty()) {
+                                AlertDialog(
+                                    onDismissRequest = { pendingTrash = null },
+                                    title = { Text("Suppression bloquee") },
+                                    text = {
+                                        Text(
+                                            "Cette selection mettrait a la corbeille tous les exemplaires de " +
+                                                plan.blocked.size + " groupe(s) de doublons. " +
+                                                "Il faut en garder au moins un par groupe.",
+                                        )
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = {
+                                            CleanupSafety.pathsToUncheck(plan.blocked).forEach { checkedFiles.remove(it) }
+                                            pendingTrash = null
+                                            message = "Le plus ancien exemplaire a ete decoche dans chaque groupe concerne."
+                                        }) { Text("Garder le plus ancien") }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { pendingTrash = null }) { Text("Annuler") }
+                                    },
+                                )
+                            } else if (plan.files.isNotEmpty()) {
+                                AlertDialog(
+                                    onDismissRequest = { pendingTrash = null },
+                                    title = { Text("Mettre a la corbeille ?") },
+                                    text = {
+                                        Text(
+                                            plan.files.size.toString() + " fichier(s), " + human(plan.bytes) +
+                                                " seront deplaces vers la corbeille. " +
+                                                "Tu pourras les restaurer depuis l'ecran Corbeille.",
+                                        )
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = {
+                                            pendingTrash = null
+                                            performTrash(plan.files)
+                                        }) { Text("Mettre a la corbeille") }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { pendingTrash = null }) { Text("Annuler") }
+                                    },
+                                )
+                            }
+                        }
+
                         // --- Etat du stockage par type ---
                         Card(Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -332,54 +437,7 @@ fun StorageCleanApp(activity: ComponentActivity) {
                                             if (selCount > 0) {
                                                 Button(
                                                     onClick = {
-                                                        scope.launch {
-                                                            val moved = withContext(Dispatchers.IO) {
-                                                                val movedList = mutableListOf<String>()
-                                                                files.forEach { f ->
-                                                                    if (checkedFiles[f.path] == true &&
-                                                                        Trash.move(activity, f.path) != null
-                                                                    ) {
-                                                                        movedList.add(f.path)
-                                                                    }
-                                                                }
-                                                                movedList
-                                                            }
-                                                            if (moved.isNotEmpty()) {
-                                                                val movedSet = moved.toHashSet()
-                                                                val movedBytes = r.categoryFiles.values
-                                                                    .flatten()
-                                                                    .filter { it.path in movedSet }
-                                                                    .sumOf { it.size }
-                                                                val all = r.categoryFiles.values
-                                                                    .flatten()
-                                                                    .filter { it.path !in movedSet }
-                                                                val newCatFiles = all.groupBy { it.category ?: "Autres" }
-                                                                val newStats = newCatFiles
-                                                                    .map { (cat, list) ->
-                                                                        TypeStat(cat, list.size, list.sumOf { it.size })
-                                                                    }
-                                                                    .sortedByDescending { it.bytes }
-                                                                val newGroups = r.groups
-                                                                    .map { g ->
-                                                                        g.copy(files = g.files.filter { it.path !in movedSet })
-                                                                    }
-                                                                    .filter { it.files.size > 1 }
-                                                                val newReport = ScanReport(
-                                                                    r.scanned - moved.size,
-                                                                    r.totalBytes - movedBytes,
-                                                                    newGroups,
-                                                                    newStats,
-                                                                    newCatFiles,
-                                                                )
-                                                                report = newReport
-                                                                saveReport(activity, newReport)
-                                                                checkedFiles.clear()
-                                                                trashCount = Trash.count(activity)
-                                                                message = moved.size.toString() +
-                                                                    " fichier(s) mis a la corbeille (" +
-                                                                    human(movedBytes) + ")."
-                                                            }
-                                                        }
+                                                        pendingTrash = files.filter { checkedFiles[it.path] == true }
                                                     },
                                                     modifier = Modifier.fillMaxWidth(),
                                                 ) {
@@ -397,6 +455,14 @@ fun StorageCleanApp(activity: ComponentActivity) {
                                     Stat(r.groups.size.toString(), "groupes doublons")
                                     Stat(r.redundant.toString(), "redondants")
                                     Stat(human(r.spaceGain), "recuperables")
+                                }
+                                if (checkedFiles.isNotEmpty()) {
+                                    Button(
+                                        onClick = { pendingTrash = checkedFiles.keys.mapNotNull { fileIndex[it] } },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Text("Mettre a la corbeille — " + checkedFiles.size + " coche(s)")
+                                    }
                                 }
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     OutlinedButton(onClick = {
@@ -442,13 +508,32 @@ fun StorageCleanApp(activity: ComponentActivity) {
                                         )
                                         if (i in expandedGroups.value) {
                                             Spacer(Modifier.height(4.dp))
+                                            TextButton(onClick = {
+                                                val keep = CleanupSafety.keeper(g).path
+                                                CleanupSafety.copiesToSelect(g).forEach { checkedFiles[it.path] = true }
+                                                checkedFiles.remove(keep)
+                                            }) { Text("Cocher les copies (garder le plus ancien)") }
                                             g.files.sortedBy { it.mtime }.forEach { f ->
                                                 val hidden = if (isHiddenPath(f.path)) " [cache]" else ""
-                                                val oldest = if (f == g.oldest) "  [le plus ancien]" else ""
-                                                Text(
-                                                    "• " + human(f.size) + "  " + f.path + hidden + oldest,
-                                                    fontSize = 12.sp,
-                                                )
+                                                val oldest =
+                                                    if (f.path == CleanupSafety.keeper(g).path) "  [le plus ancien]" else ""
+                                                Row(
+                                                    Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Checkbox(
+                                                        checked = checkedFiles[f.path] == true,
+                                                        onCheckedChange = { v ->
+                                                            if (v) checkedFiles[f.path] = true
+                                                            else checkedFiles.remove(f.path)
+                                                        },
+                                                    )
+                                                    Text(
+                                                        "• " + human(f.size) + "  " + f.path + hidden + oldest,
+                                                        fontSize = 12.sp,
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -691,6 +776,13 @@ fun TrashScreen(activity: ComponentActivity, onDone: () -> Unit, onChanged: () -
                             Text(File(item.originalPath).name, style = MaterialTheme.typography.titleSmall)
                             Text("Origine : " + item.originalPath, fontSize = 11.sp)
                             Text("Taille : " + human(item.size), fontSize = 11.sp)
+                            if (item.trashedAt > 0L) {
+                                Text(
+                                    "Mis a la corbeille : " +
+                                        SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.FRANCE).format(Date(item.trashedAt)),
+                                    fontSize = 11.sp,
+                                )
+                            }
                             Row {
                                 TextButton(onClick = {
                                     if (Trash.restore(activity, item)) {

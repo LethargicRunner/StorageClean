@@ -59,6 +59,7 @@ object FileScanner {
             val dir = File(root)
             if (!dir.isDirectory) continue
             dir.walkTopDown()
+                .onEnter { it.name != TRASH_DIR_NAME } // la corbeille StorageClean n'est jamais scannee
                 .onFail { _, _ -> } // repertoires illisibles (ex : Android/data) : on ignore
                 .forEach { f ->
                     try {

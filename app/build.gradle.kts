@@ -12,8 +12,8 @@ android {
         applicationId = "fr.lethargicrunner.storageclean"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.2.0"
+        versionCode = 6
+        versionName = "0.2.1"
     }
 
     buildTypes {
@@ -40,4 +40,6 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.core:core-ktx:1.13.1")
     testImplementation("junit:junit:4.13.2")
+    // org.json reel pour les tests JVM (l'API Android y est factice)
+    testImplementation("org.json:json:20240303")
 }
